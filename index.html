@@ -103,6 +103,9 @@ summary::-webkit-details-marker{display:none}
           <textarea id="action"></textarea>
         </div>
       </div>
+      <div style="margin-top:7px;display:flex;justify-content:flex-end">
+        <button id="clearDetails" class="secondary" type="button" style="min-height:32px;padding:0 12px">Clear details</button>
+      </div>
     </details>
 
     <div id="done" class="done">
@@ -158,6 +161,11 @@ stopBtn.addEventListener('click',()=>{stopTimer();statusEl.textContent='Stopped'
 document.getElementById('againBtn').addEventListener('click',()=>{remaining=selectedMin*60;start()});
 document.getElementById('doneBtn').addEventListener('click',()=>{stopTimer();statusEl.textContent='Done';done.classList.remove('show')});
 document.getElementById('endBtn').addEventListener('click',()=>{stopTimer();statusEl.textContent='Stopped';done.classList.remove('show')});
+document.getElementById('clearDetails').addEventListener('click',()=>{
+  document.getElementById('task').value='';
+  document.getElementById('action').value='';
+  document.getElementById('task').focus();
+});
 render();
 </script>
 </body>
