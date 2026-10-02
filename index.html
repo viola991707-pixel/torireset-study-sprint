@@ -29,7 +29,7 @@ button,input{font:inherit}
 .preset,.ctl,.secondary{border:1px solid var(--border);background:transparent;color:var(--text);border-radius:12px;min-height:38px;cursor:pointer}
 .preset.active{background:rgba(156,175,136,.18);border-color:var(--sage)}
 .preset b{display:block;font-size:16px}.preset small{display:block;font-size:9px;color:var(--muted)}
-.custom{display:flex;gap:6px;margin-bottom:8px}
+.custom{display:flex;gap:6px;margin-bottom:8px}\n.custom[hidden]{display:none!important}
 .custom input{width:100%;min-width:0;border:1px solid var(--border);background:transparent;color:var(--text);border-radius:12px;padding:9px 10px;outline:none}
 .custom .secondary{padding:0 12px;white-space:nowrap}
 .primary{width:100%;border:0;border-radius:999px;background:var(--terracotta);color:#1f1b18;font-weight:700;min-height:42px;cursor:pointer}
@@ -116,7 +116,6 @@ summary::-webkit-details-marker{display:none}
         <button class="ctl" id="endBtn">Stop Here</button>
       </div>
     </div>
-    <div class="foot">No streaks. No penalty. A short sprint still counts.</div>
   </section>
 </div>
 
@@ -141,6 +140,7 @@ function tick(){
 function start(){if(remaining<=0)remaining=selectedMin*60;running=true;done.classList.remove('show');render();timerId=setInterval(tick,1000)}
 function choose(min){
   stopTimer();selectedMin=min;remaining=min*60;done.classList.remove('show');
+  document.getElementById('customRow').hidden=true;
   document.querySelectorAll('.preset').forEach(b=>b.classList.toggle('active',Number(b.dataset.min)===min));
   render()
 }
