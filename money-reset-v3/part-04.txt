@@ -1,0 +1,233 @@
+);
+    if (n === 0) return 'today'; if (n === 1) return 'tomorrow'; if (n === -1) return 'yesterday';
+    return n > 1 ? 'in ' + n + ' days' : Math.abs(n) + ' days ago';
+  }
+  const ordinal = (n) => n + (['th', 'st', 'nd', 'rd'][(n % 100 > 10 && n % 100 < 14) ? 0 : (n % 10 < 4 ? n % 10 : 0)]);
+  function freqLabel(it) {
+    switch (it.freq) {
+      case 'monthly': return 'Monthly, ' + (it.day >= 31 ? 'last day' : 'the ' + ordinal(it.day));
+      case 'twice': return 'Twice a month: ' + ordinal(it.day) + ' & ' + ordinal(it.day2);
+      case 'biweekly': return 'Every 2 weeks';
+      case 'weekly': return 'Every week';
+      case 'months': return 'Every ' + it.every + ' months';
+      case 'once': return 'Once, ' + dlabel(it.date);
+      default: return '';
+    }
+  }
+  const CURRENCIES = ['USD', 'GBP', 'EUR', 'CAD', 'AUD', 'NZD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'UAH', 'INR', 'JPY', 'MXN', 'BRL', 'ZAR'];
+
+  /* ---------- toast / modal ---------- */
+  let toastT;
+  function toast(msg, undo) {
+    const r = $('#toastRoot');
+    r.innerHTML = '<div class="toast" role="status"><span>' + esc(msg) + '</span>' + (undo ? '<button data-act="undo">Undo</button>' : '') + '</div>';
+    ses.undo = undo || null;
+    clearTimeout(toastT);
+    toastT = setTimeout(() => { r.innerHTML = ''; ses.undo = null; }, undo ? 7000 : 3500);
+  }
+  function closeModal() {
+    $('#modalRoot').innerHTML = ''; ses.wizBack = null;
+    const back = ses.modalFrom; ses.modalFrom = null; if (back && document.contains(back)) back.focus(); // keyboard users land where they were
+    if (ses.syncPending) syncFromOtherTab();
+  }
+  function modal(title, body, o) {
+    o = o || {};
+    const root = $('#modalRoot');
+    if (!root.firstChild) ses.modalFrom = document.activeElement;
+    root.innerHTML = '<div class="overlay" data-act="modal-bg"><form class="sheet" role="dialog" aria-modal="true" aria-label="' + esc(title) + '" novalidate>' +
+      '<h2>' + esc(title) + '</h2>' + body + '<div class="err" id="mErr" role="alert"></div>' +
+      '<div class="row wrapflex" style="margin-top:16px;justify-content:flex-end">' + (o.extra || '') +
+      '<button type="button" data-act="modal-close">' + esc(o.cancel || 'Cancel') + '</button>' +
+      (o.noSubmit ? '' : '<button class="primary" type="submit">' + esc(o.submit || 'Save') + '</button>') + '</div></form></div>';
+    const form = root.querySelector('form');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const r = o.onSubmit ? o.onSubmit(new FormData(form), form) : undefined;
+      if (typeof r === 'string') { $('#mErr').textContent = r; return; }
+      if (r !== false) closeModal();
+    });
+    if (o.onOpen) o.onOpen(form);
+    const f = form.querySelector('input:not([type=hidden]):not([type=checkbox]),select,textarea');
+    if (f) f.focus();
+  }
+  const fld = (label, name, val, o) => {
+    o = o || {};
+    return '<label for="f_' + name + '">' + esc(label) + '</label><input id="f_' + name + '" name="' + name + '" type="' + (o.type || 'text') + '" value="' + esc(val == null ? '' : val) + '"' +
+      (o.money ? ' inputmode="decimal" autocomplete="off"' : '') + (o.num ? ' inputmode="numeric"' : '') + (o.max2 ? ' max="' + o.max2 + '"' : '') + (o.ph ? ' placeholder="' + esc(o.ph) + '"' : '') + (o.max ? ' maxlength="' + o.max + '"' : '') + '>' +
+      (o.hint ? '<p class="hint">' + esc(o.hint) + '</p>' : '');
+  };
+  const sel = (label, name, opts, val) => '<label for="f_' + name + '">' + esc(label) + '</label><select id="f_' + name + '" name="' + name + '">' +
+    opts.map((x) => '<option value="' + esc(x[0]) + '"' + (String(x[0]) === String(val) ? ' selected' : '') + '>' + esc(x[1]) + '</option>').join('') + '</select>';
+  const currencySel = (val) => sel('Currency', 'currency', CURRENCIES.map((c) => [c, c]), val);
+
+  /* ---------- schedule form (bills + money in) ---------- */
+  function schedFields(it, withEarly) {
+    it = it || {};
+    const t = today();
+    return sel('How often', 'freq', [['monthly', 'Once a month'], ['twice', 'Twice a month'], ['biweekly', 'Every 2 weeks'], ['weekly', 'Every week'], ['months', 'Every few months'], ['once', 'Just once']], it.freq || 'monthly') +
+      '<div data-show="monthly twice">' + fld('Day of the month', 'day', it.day || C.dayOfMonth(t), { num: true, hint: 'Type 31 for the last day of the month.' }) + '</div>' +
+      '<div data-show="twice">' + fld('Second day', 'day2', it.day2 || 15, { num: true }) + '</div>' +
+      '<div data-show="biweekly weekly months">' + fld('A date it falls on', 'anchor', it.anchor || t, { type: 'date', hint: 'The next one is fine.' }) + '</div>' +
+      '<div data-show="months">' + sel('Every how many months', 'every', [2, 3, 4, 6, 12].map((n) => [n, n + ' months']), it.every || 6) + '</div>' +
+      '<div data-show="once">' + fld('Date', 'date', it.date || t, { type: 'date' }) + '</div>' +
+      (withEarly ? '<label class="check"><input type="checkbox" name="early"' + (it.early ? ' checked' : '') + '> If it lands on a weekend, it arrives the Friday before</label>' : '');
+  }
+  function bindSched(form) {
+    const upd = () => { const v = form.elements.freq.value; form.querySelectorAll('[data-show]').forEach((el) => { el.hidden = !el.dataset.show.split(' ').includes(v); }); };
+    form.elements.freq.addEventListener('change', upd); upd();
+  }
+  const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
+  // money that already happened can't be dated in the future (a planned item belongs in Bills or Money in)
+  const FUTURE_MSG = 'That date is in the future. Put planned items in Bills or Money in instead.';
+  const pastDate = (fd, name) => { const d = fd.get(name); return isDate(d) ? d : today(); };
+  const isFuture = (d) => isDate(d) && d > today();
+  function readSched(fd, withEarly) {
+    const freq = fd.get('freq'); const it = { freq };
+    if (freq === 'monthly' || freq === 'twice') {
+      const d = parseInt(fd.get('day'), 10);
+      if (!(d >= 1 && d <= 31)) return 'Pick a day between 1 and 31.';
+      it.day = d;
+      if (freq === 'twice') {
+        const d2 = parseInt(fd.get('day2'), 10); if (!(d2 >= 1 && d2 <= 31) || d2 === d) return 'Pick two different days.';
+        if (d >= 29 && d2 >= 29) return 'Days 29 to 31 do not exist in every month, so two of them would merge in February. Pick one day up to the 28th.';
+        it.day2 = d2;
+      }
+    } else if (freq === 'biweekly' || freq === 'weekly' || freq === 'months') {
+      const a = fd.get('anchor'); if (!isDate(a)) return 'Pick a date.'; it.anchor = a;
+      if (freq === 'months') it.every = parseInt(fd.get('every'), 10) || 6;
+    } else if (freq === 'once') {
+      const d = fd.get('date'); if (!isDate(d)) return 'Pick a date.'; it.date = d;
+    }
+    if (withEarly) it.early = !!fd.get('early');
+    return it;
+  }
+
+  /* ---------- ledger actions ---------- */
+  function addEntry(e, msg) {
+    P.ledger.push(e); save(); render();
+    toast(msg, () => { delEntry(e.id); render(); });
+  }
+  function delEntry(id) {
+    const i = P.ledger.findIndex((e) => e.id === id); if (i < 0) return null;
+    const e = P.ledger.splice(i, 1)[0]; const rm = [];
+    ['paid', 'received'].forEach((m) => Object.keys(P[m]).forEach((k) => { if (P[m][k] === id) { rm.push([m, k]); delete P[m][k]; } }));
+    save(); return { e, i, rm };
+  }
+  function restoreEntry(r) { P.ledger.splice(r.i, 0, r.e); r.rm.forEach((x) => { P[x[0]][x[1]] = r.e.id; }); save(); }
+  function findOcc(key) { const a = key.split('|'); const b = P.bills.find((x) => x.id === a[0]); return b ? { bill: b, date: a[1] } : null; }
+  function payBill(key) {
+    const o = findOcc(key); if (!o) return;
+    const b = o.bill; const e = C.payBillEntry(P, b, key, today());
+    P.paid[key] = e.id;
+    addEntry(e, b.name + ' marked paid');
+  }
+  function skipKey(map, key, msg) {
+    P[map][key] = 'skip'; save(); render();
+    toast(msg, () => { delete P[map][key]; save(); render(); });
+  }
+  function receive(key) {
+    const a = key.split('|'); const inc = P.incomes.find((x) => x.id === a[0]); if (!inc) return;
+    const e = C.incomeEntry(today(), inc.amount, inc.name, key);
+    P.received[key] = e.id;
+    addEntry(e, inc.name + ' added to your balance');
+  }
+  function setBalance(newBal) {
+    if (!P.ledger.length && !P.setupDone) { P.startBalance = newBal; return; }
+    const diff = C.round2(newBal - C.balance(P));
+    if (diff !== 0) P.ledger.push(C.adjustEntry(today(), diff, 'Balance update'));
+  }
+  const backupDue = () => {
+    if (P.example) return false;
+    const c = S.changes || 0;
+    if (!S.lastBackup) return c >= 10;
+    return c >= 25 || (c >= 3 && C.daysBetween(S.lastBackup, today()) >= 7);
+  };
+
+  /* ---------- views ---------- */
+  function banners() {
+    let h = '';
+    if (!storageOK) h += '<div class="banner" role="alert"><b>Saving is turned off in this browser</b> (a private window, or storage is blocked). Your numbers stay until you close this tab. <button class="tiny" data-act="goto" data-view="more" data-sub="backup">Download a backup</button></div>';
+    if (corrupt) h += '<div class="banner" role="alert">Your saved data could not be read, so a fresh plan was started. A copy of the old data was kept in this browser. If you have a backup file, restore it in More &rarr; Backup.</div>';
+    return h;
+  }
+
+  function viewToday() {
+    const t = today(); const s = C.computeSafe(P, t);
+    const step = C.nextStep(P, t, { hour: new Date().getHours(), backupDue: backupDue(), dlabel });
+    let h = '';
+    if (P.example) {
+      h += '<div class="card soft"><h2>Welcome &#127793;</h2><p>These are <b>example numbers</b>, so you can poke at everything safely. Nothing here is real.</p>' +
+        '<div class="chips"><button class="primary" data-act="start-own">Start my own plan</button><button data-act="goto" data-view="more" data-sub="help">How it works</button></div></div>';
+    }
+    if (ses.prevOpened && !P.example && P.setupDone && !ses.catchDismissed && C.daysBetween(ses.prevOpened, t) >= 7) {
+      h += '<div class="card sage"><h2>Welcome back</h2><p>It has been a while, and that is completely fine. Nothing is broken and nothing is owed to the app.</p>' +
+        '<div class="chips"><button class="primary" data-act="balance">Update my balance</button><button data-act="catch-clear">Treat everything before today as handled</button><button class="ghost" data-act="catch-dismiss">Not now</button></div></div>';
+    }
+    // big number
+    const next = s.nextPay;
+    let big, sub1, cardCls = '', pill = '';
+    const dayWord = s.daysLeft + (s.daysLeft === 1 ? ' day' : ' days');
+    if (status(s) === 'setup') {
+      big = '&mdash;'; sub1 = 'Set up in four small steps and your number appears here.'; cardCls = 'soft';
+    } else if (C.isEmptyPlan(P)) {
+      big = '&mdash;'; sub1 = 'Add what is in your account and your number appears here.'; cardCls = 'soft';
+    } else if (s.status === 'tight') {
+      big = fmtHero(0); cardCls = 'amber'; pill = '<span class="pill warn">A tight stretch</span>';
+      sub1 = 'The bills before payday are ' + fmt(-s.spendable) + ' more than what is free. Nothing to fix this second. Things that could move: a bill, some set-aside money, or one spend.';
+    } else if (s.status === 'over') {
+      big = fmtHero(0); cardCls = 'amber'; pill = '<span class="pill warn">Today’s share is used</span>';
+      sub1 = 'That is okay. The plan adjusts: about ' + fmt(Math.max(0, C.round2(s.spendable / Math.max(1, s.daysLeft - 1)))) + ' a day from tomorrow.';
+    } else {
+      big = fmtHero(s.left); pill = '<span class="pill ok">On track</span>';
+      sub1 = dayWord + (next ? ' until payday · ' + dlabel(next.date) : ' until the end of the month') + (s.spentToday ? ' · plan is ' + fmt(s.perDay) + ' a day' : '');
+    }
+    h += '<section class="card hero ' + cardCls + '" aria-labelledby="sts"><div class="row between"><div class="label" id="sts">Safe to spend today</div>' + pill + '</div><div class="big num">' + big + '</div><p class="herosub">' + sub1 + '</p>';
+    if (s.noIncome && P.setupDone && !C.isEmptyPlan(P)) h += '<p class="small muted">Add your paycheck in <a href="#" data-act="nav" data-view="income">Money in</a> and I will count down to payday.</p>';
+    h += howHtml(s) + '</section>';
+
+    // right now
+    h += '<section class="card focus" aria-labelledby="rn"><div class="label" id="rn">Right now · one thing</div><h2>' + esc(step.title) + '</h2><p class="muted">' + esc(step.detail) + '</p>' + stepButtons(step) + '</section>';
+
+    // quick log
+    if (P.setupDone || P.example) {
+      const freq = C.frequent(P, t, 4);
+      h += '<section class="card"><form data-form="quick" autocomplete="off"><label for="quick" style="margin-top:0">Log a spend</label><div class="row"><input id="quick" name="q" placeholder="Amount, e.g. 12.50" enterkeyhint="done" inputmode="text"><button class="primary" type="submit">Log</button></div>' +
+        '<div id="quickMore"' + (ses.quickOpen ? '' : ' hidden') + '><p class="hint">Start with + for money coming in, like &ldquo;+50 gift&rdquo;. Got a refund? Use Money in &rarr; Add one-off money &rarr; Refund.</p>' +
+        (freq.length ? '<p class="label" style="margin:10px 0 0">Log again</p><div class="chips" style="margin-top:6px">' + freq.map((m) => '<button type="button" class="chip" data-act="log-again" data-n="' + esc(m.note) + '" data-a="' + m.amt + '" data-c="' + esc(m.cat || '') + '">' + esc(m.note) + ' · ' + esc(fmt(m.amt)) + '</button>').join('') + '</div>' : '') +
+        '<div class="chips">' + [5, 10, 20, 50].map((n) => '<button type="button" class="chip" data-act="chip" data-v="' + n + '">' + n + '</button>').join('') + '</div>' +
+        '<label for="qnote">What was it? <span class="tag" style="font-weight:400">(optional)</span></label><input id="qnote" name="note" placeholder="coffee, groceries, a gift…" maxlength="60" enterkeyhint="done">' +
+        '<p class="label" style="margin:14px 0 0">Category <span class="tag" style="text-transform:none;letter-spacing:0">(optional, I will guess from the words)</span></p>' +
+        '<div class="chips" style="margin-top:6px" role="group" aria-label="Category">' + P.cats.map((c) => '<button type="button" class="chip' + (ses.quickCat === c.name ? ' on' : '') + '" data-act="qcat" data-v="' + esc(c.name) + '" aria-pressed="' + (ses.quickCat === c.name) + '">' + esc(c.name) + '</button>').join('') + '</div>' +
+        '<label for="qdate">Date of the spend</label><input id="qdate" name="date" type="date" value="' + t + '" max="' + t + '">' +
+        '<div class="row" style="justify-content:flex-end;margin-top:10px"><button type="button" class="ghost" data-act="quick-close">Cancel</button></div></div></form>';
+      const recent = P.ledger.filter((e) => e.type === 'spend').slice().reverse().sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).slice(0, 3);
+      if (recent.length) h += '<p class="label" style="margin:16px 0 0">Recent spending</p><ul class="list" style="margin-top:4px">' + recent.map((e) => '<li><button type="button" class="rowedit grow" data-act="edit-spend" data-id="' + e.id + '" aria-label="Edit">' + esc(e.note || e.cat || 'Spending') + '<br><span class="tag">' + esc(relDay(e.date, t)) + (e.note && e.cat ? ' · ' + esc(e.cat) : '') + '</span></button><span class="amt num">' + fmt(e.amt) + '</span><button class="x" data-act="del-entry" data-id="' + e.id + '" aria-label="Remove">×</button></li>').join('') + '</ul>';
+      h += '</section>';
+    }
+
+    // before payday
+    if (s.due.length) {
+      h += '<section class="card"><div class="row between"><h2 style="margin:0">Still to go out before payday</h2><span class="amt num">' + fmt(s.billsTotal) + '</span></div><ul class="list">' +
+        s.due.slice(0, 5).map((o) => '<li><span class="grow">' + esc(o.bill.name) + '<br><span class="tag">' + (o.overdue ? 'was due ' : 'due ') + dlabel(o.date) + '</span></span><span class="amt num">' + fmt(o.bill.amount) + '</span></li>').join('') + '</ul>' +
+        (s.due.length > 5 ? '<p class="small muted">+ ' + (s.due.length - 5) + ' more</p>' : '') + '<button class="tiny" data-act="nav" data-view="bills">All bills</button></section>';
+    }
+    if (backupDue()) h += '<div class="card amber"><b>A backup is due.</b> Your numbers live only in this browser. <button class="tiny" data-act="backup-dl">Download backup</button></div>';
+
+    // brain dump
+    h += '<section class="card"><details id="dumpBox"' + (ses.dumpOpen ? ' open' : '') + '><summary>Brain dump</summary><p class="muted small">The one place with no amount, no date, no category. It never touches your numbers.</p>' +
+      '<form data-form="dump" class="row"><input name="t" placeholder="What is in your head?" aria-label="Brain dump"><button type="submit" class="primary">Add</button></form>' +
+      '<ul class="list">' + P.dump.slice().reverse().map((d) => '<li><span class="grow">' + esc(d.text) + '</span><button class="tiny ghost" data-act="dump-del" data-id="' + d.id + '">Done</button></li>').join('') + '</ul></details></section>';
+    return h;
+  }
+  const status = (s) => s.status;
+
+  function howHtml(s) {
+    if (status(s) === 'setup') return '';
+    const rows = [['Money in your account', fmt(s.balance)]];
+    if (s.reserve) rows.push(['Set aside in goals', '&minus; ' + fmt(s.reserve)]);
+    rows.push(['Bills before payday (' + s.due.length + ')' + (s.billsCovered ? ', ' + fmt(s.billsCovered) + ' already set aside in goals' : ''), '&minus; ' + fmt(s.billsUncovered)]);
+    rows.push(['Free until payday', fmt(s.spendable)]);
+    rows.push(['Split over ' + s.daysLeft + (s.daysLeft === 1 ? ' day' : ' days'), fmt(s.perDay) + ' a day']);
+    if (s.spentToday) rows.push(['Already spent today', '&minus; ' + fmt(s.spentToday)]);
+    rows.push(['Left today', fmt(Math.max(0, s.left))]);
+    return '<details class="how"><summary>How is this worked out?</summary><table><tbody>' + rows.map((r, i) => '<tr' + (i === rows.length - 1 ? ' class="total"' : '') + '><td>' + r[0] + '</td><td>
