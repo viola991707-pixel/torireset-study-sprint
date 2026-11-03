@@ -1,0 +1,305 @@
+t Money Reset — core logic (no DOM). Dates are local 'YYYY-MM-DD' strings. */
+(function (root) {
+  'use strict';
+
+  /* ---------- dates ---------- */
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = (y, m, d) => y + '-' + pad(m) + '-' + pad(d);
+  const parse = (s) => { const a = s.split('-').map(Number); return { y: a[0], m: a[1], d: a[2] }; };
+  const dayNum = (s) => { const p = parse(s); return Math.round(Date.UTC(p.y, p.m - 1, p.d) / 86400000); };
+  const fromDayNum = (n) => { const dt = new Date(n * 86400000); return iso(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate()); };
+  const addDays = (s, n) => fromDayNum(dayNum(s) + n);
+  const daysBetween = (a, b) => dayNum(b) - dayNum(a);
+  const dim = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const dow = (s) => new Date(dayNum(s) * 86400000).getUTCDay();
+  const todayISO = () => { const d = new Date(); return iso(d.getFullYear(), d.getMonth() + 1, d.getDate()); };
+  const addMonths = (y, m, n) => { const t = y * 12 + (m - 1) + n; return { y: Math.floor(t / 12), m: (t % 12) + 1 }; };
+  const monthKey = (s) => s.slice(0, 7);
+  const dayOfMonth = (s) => parse(s).d;
+  const round2 = (x) => Math.round((x + Number.EPSILON) * 100) / 100;
+  const uid = () => Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+
+  /* ---------- schedules ---------- */
+  // item: {freq:'monthly'|'twice'|'biweekly'|'weekly'|'months'|'once', day, day2, anchor, every, date, start, early}
+  function monthIter(f, t, fn) {
+    const a = parse(f), b = parse(t);
+    let cur = { y: a.y, m: a.m };
+    while (cur.y * 12 + cur.m <= b.y * 12 + b.m) { fn(cur.y, cur.m); cur = addMonths(cur.y, cur.m, 1); }
+  }
+
+  function rawDates(it, f, t) {
+    const out = [];
+    const clamp = (y, m, d) => iso(y, m, Math.min(Math.max(1, d | 0), dim(y, m)));
+    switch (it.freq) {
+      case 'monthly':
+        monthIter(f, t, (y, m) => out.push(clamp(y, m, it.day || 1)));
+        break;
+      case 'twice':
+        monthIter(f, t, (y, m) => { out.push(clamp(y, m, it.day || 1)); out.push(clamp(y, m, it.day2 || 15)); });
+        break;
+      case 'weekly':
+      case 'biweekly': {
+        const step = it.freq === 'weekly' ? 7 : 14;
+        const an = it.anchor || f;
+        const k = Math.ceil((dayNum(f) - dayNum(an)) / step);
+        for (let n = dayNum(an) + k * step; n <= dayNum(t); n += step) out.push(fromDayNum(n));
+        break;
+      }
+      case 'months': {
+        const an = parse(it.anchor || f);
+        const e = Math.max(1, it.every | 0 || 1);
+        const base = an.y * 12 + an.m;
+        monthIter(f, t, (y, m) => { if ((((y * 12 + m - base) % e) + e) % e === 0) out.push(clamp(y, m, an.d)); });
+        break;
+      }
+      case 'once':
+        if (it.date) out.push(it.date);
+        break;
+      default: break;
+    }
+    return out;
+  }
+
+  function occurrences(it, from, to) {
+    if (dayNum(to) < dayNum(from)) return [];
+    const f = addDays(from, -3), t = addDays(to, 3);
+    let list = rawDates(it, f, t);
+    if (it.early) {
+      list = list.map((s) => { const w = dow(s); return w === 6 ? addDays(s, -1) : w === 0 ? addDays(s, -2) : s; });
+    }
+    const lo = dayNum(from), hi = dayNum(to);
+    const startN = it.start && it.freq !== 'once' ? dayNum(it.start) : -Infinity;
+    const seen = {};
+    return list
+      .filter((s) => { const n = dayNum(s); return n >= lo && n <= hi && n >= startN; })
+      .filter((s) => (seen[s] ? false : (seen[s] = true)))
+      .sort();
+  }
+
+  /* ---------- profile ---------- */
+  const DEFAULT_CATS = ['Groceries', 'Eating out', 'Transport', 'Home', 'Health', 'Fun', 'Kids & pets', 'Other'];
+
+  function newProfile(opts) {
+    opts = opts || {};
+    const today = opts.today || todayISO();
+    return {
+      id: uid(), name: opts.name || 'My budget', title: opts.title || 'My calm money plan',
+      currency: opts.currency || 'USD', startBalance: 0, created: today,
+      setupDone: false, example: false, simple: false,
+      ledger: [], bills: [], incomes: [], goals: [], debts: [],
+      paid: {}, received: {}, dump: [], snooze: {}, waits: [],
+      cats: DEFAULT_CATS.map((n) => ({ id: uid(), name: n, limit: null })),
+    };
+  }
+
+  function newAppData() {
+    return { v: 1, activeId: null, profiles: [], theme: 'auto', lastOpened: null, lastBackup: null, changes: 0 };
+  }
+
+  const balance = (p) => round2(p.startBalance + p.ledger.reduce((a, e) => a + (e.delta || 0), 0));
+  const goalSaved = (p, goalId) => round2(p.ledger.reduce((a, e) => a + (e.goalId === goalId ? (e.goalDelta || 0) : 0), 0));
+  const goalReserve = (p) => round2(p.ledger.reduce((a, e) => a + (e.goalId ? (e.goalDelta || 0) : 0), 0));
+  const debtBalance = (p, d) => round2(d.balance0 - p.ledger.reduce((a, e) => a + (e.debtId === d.id ? (e.debtPaid || 0) : 0), 0));
+
+  /* ---------- ledger helpers (pure: return new entry, caller pushes) ---------- */
+  function entry(type, date, o) {
+    return Object.assign({ id: uid(), type, date, delta: 0, amt: 0 }, o || {});
+  }
+  const spendEntry = (date, amt, cat, note, goalId) =>
+    entry('spend', date, { amt, delta: -amt, cat: cat || null, note: note || '', goalId: goalId || undefined, goalDelta: goalId ? -amt : undefined });
+  const incomeEntry = (date, amt, note, ref) => entry('income', date, { amt, delta: amt, note: note || '', ref });
+  const billEntry = (date, bill, ref) =>
+    entry('bill', date, { amt: bill.amount, delta: -bill.amount, note: bill.name, ref, billId: bill.id,
+      goalId: bill.goalId || undefined, goalDelta: bill.goalId ? -bill.amount : undefined,
+      debtId: bill.debtId || undefined, debtPaid: bill.debtId ? bill.amount : undefined });
+  const setAsideEntry = (date, goalId, amt) => entry('goal', date, { amt: Math.abs(amt), delta: 0, goalId, goalDelta: amt, note: amt >= 0 ? 'Set aside' : 'Released' });
+  const debtPaymentEntry = (date, debt, amt) => entry('debt', date, { amt, delta: -amt, debtId: debt.id, debtPaid: amt, note: debt.name });
+  // money back from a purchase: raises the balance and lowers that category's spending, but is not earned income
+  const refundEntry = (date, amt, cat, note) => entry('refund', date, { amt, delta: amt, cat: cat || null, note: note || '' });
+  const adjustEntry = (date, delta, note) => entry('adjust', date, { amt: Math.abs(delta), delta, note: note || 'Balance update' });
+
+  /* ---------- paydays ---------- */
+  const clampLookback = (p, from, today) => {
+    const floor = addDays(today, -400);
+    const f = from || p.created;
+    return dayNum(f) < dayNum(floor) ? floor : f;
+  };
+
+  function nextPayday(p, today) {
+    let best = null;
+    for (const inc of p.incomes) {
+      const occ = occurrences(inc, today, addDays(today, 400));
+      for (const d of occ) {
+        if (p.received[inc.id + '|' + d]) continue;
+        if (!best || dayNum(d) < dayNum(best.date)) best = { date: d, income: inc };
+        break;
+      }
+    }
+    return best;
+  }
+
+  function overduePaychecks(p, today) {
+    const out = [];
+    for (const inc of p.incomes) {
+      const occ = occurrences(inc, clampLookback(p, inc.start, today), addDays(today, -1));
+      for (const d of occ) { const key = inc.id + '|' + d; if (!p.received[key]) out.push({ income: inc, date: d, key }); }
+    }
+    return out.sort((a, b) => dayNum(a.date) - dayNum(b.date));
+  }
+
+  function billsBetween(p, from, to) {
+    const out = [];
+    for (const b of p.bills) {
+      for (const d of occurrences(b, clampLookback(p, b.start, from), to)) {
+        if (dayNum(d) < dayNum(from)) continue;
+        out.push({ bill: b, date: d, key: b.id + '|' + d, state: p.paid[b.id + '|' + d] ? (p.paid[b.id + '|' + d] === 'skip' ? 'skip' : 'paid') : 'open' });
+      }
+    }
+    return out.sort((a, b) => dayNum(a.date) - dayNum(b.date) || a.bill.name.localeCompare(b.bill.name));
+  }
+
+  function overdueBills(p, today) {
+    const out = [];
+    for (const b of p.bills) {
+      for (const d of occurrences(b, clampLookback(p, b.start, today), addDays(today, -1))) {
+        const key = b.id + '|' + d;
+        if (!p.paid[key]) out.push({ bill: b, date: d, key, overdue: true });
+      }
+    }
+    return out.sort((a, b) => dayNum(a.date) - dayNum(b.date));
+  }
+
+  /* ---------- safe to spend ---------- */
+  function firstOfNextMonth(today) { const a = parse(today); const n = addMonths(a.y, a.m, 1); return iso(n.y, n.m, 1); }
+
+  function computeSafe(p, today) {
+    const bal = balance(p), reserve = goalReserve(p);
+    let np = nextPayday(p, today);
+    // a paycheck due today that is not in the balance yet must not turn the whole balance into "one day's money";
+    // count towards the one after it until the person confirms it arrived (the Right now card asks)
+    if (np && np.date === today) np = nextPayday(p, addDays(today, 1)) || np;
+    const endISO = np ? np.date : firstOfNextMonth(today);
+    const daysLeft = Math.max(1, daysBetween(today, endISO));
+    const due = [];
+    for (const o of overdueBills(p, today)) due.push(o);
+    for (const o of billsBetween(p, today, addDays(endISO, -1))) if (o.state === 'open') due.push({ bill: o.bill, date: o.date, key: o.key, overdue: false });
+    const billsTotal = round2(due.reduce((a, o) => a + o.bill.amount, 0));
+    // a bill paid from a goal is already protected by the goal's reserve, so only the part the goal cannot cover
+    // reduces what is free (otherwise the same money is held back twice)
+    const room = {}; p.goals.forEach((g) => { room[g.id] = Math.max(0, goalSaved(p, g.id)); });
+    let billsUncovered = 0;
+    for (const o of due) {
+      const gid = o.bill.goalId; let c = 0;
+      if (gid && Object.prototype.hasOwnProperty.call(room, gid)) { c = Math.min(o.bill.amount, room[gid]); room[gid] -= c; }
+      o.covered = round2(c); billsUncovered += o.bill.amount - c;
+    }
+    billsUncovered = round2(billsUncovered);
+    const billsCovered = round2(billsTotal - billsUncovered);
+    const spendable = round2(bal - reserve - billsUncovered);
+    const spentToday = round2(p.ledger.filter((e) => e.type === 'spend' && e.date === today && !e.goalId).reduce((a, e) => a + e.amt, 0));
+    const perDay = round2((spendable + spentToday) / daysLeft);
+    const left = round2(perDay - spentToday);
+    let status = 'ok';
+    if (!p.setupDone) status = 'setup';
+    else if (spendable < 0) status = 'tight';
+    else if (left < 0) status = 'over';
+    return { balance: bal, reserve, due, billsTotal, billsUncovered, billsCovered, spendable, nextPay: np, endISO, daysLeft, spentToday, perDay, left, status, noIncome: !np };
+  }
+
+  /* ---------- "Right now" ---------- */
+  // setup was skipped and nothing has been entered yet
+  const isEmptyPlan = (p) => !!p.setupDone && !p.example && p.startBalance === 0 && !p.ledger.length && !p.bills.length && !p.incomes.length;
+
+  function nextStep(p, today, opts) {
+    opts = opts || {};
+    const dl = opts.dlabel || ((s) => s); // the UI passes a friendly date formatter
+    const sn = p.snooze || {};
+    const ok = (id) => sn[id] !== today;
+    if (!p.setupDone && !p.example) return { id: 'setup', title: 'Set up in 4 small steps', detail: 'About two minutes. You can skip anything.', action: 'setup' };
+    if (isEmptyPlan(p) && ok('empty')) return { id: 'empty', title: 'Add what is in your account', detail: 'One number is enough to start. You can add bills and paychecks any time.', action: 'balance' };
+    const od = overduePaychecks(p, addDays(today, 1))[0]; // includes today
+    if (od && ok('pay|' + od.key)) return { id: 'pay|' + od.key, title: 'Did "' + od.income.name + '" arrive?', detail: (od.date === today ? 'It is due today' : 'It was due ' + dl(od.date)) + ' — tap yes and the balance updates.', action: 'income', ref: od };
+    const ob = overdueBills(p, today)[0];
+    if (ob && ok('bill|' + ob.key)) return { id: 'bill|' + ob.key, title: 'Is "' + ob.bill.name + '" sorted?', detail: 'It was due ' + dl(ob.date) + ' — mark it paid, or skip it if it no longer applies.', action: 'bill', ref: ob };
+    const soon = billsBetween(p, today, addDays(today, 3)).find((o) => o.state === 'open');
+    if (soon && ok('soon|' + soon.key)) return { id: 'soon|' + soon.key, title: soon.bill.name + ' is coming up', detail: 'Due ' + dl(soon.date) + ' — one tap when it is paid.', action: 'bill', ref: soon };
+    const wt = (p.waits || []).find((w) => w.date < today && ok('wait|' + w.id));
+    if (wt) return { id: 'wait|' + wt.id, title: 'Still want "' + wt.name + '"?', detail: 'You gave yourself a day to think. Buy it, or let it go. Both are fine.', action: 'wait', ref: wt };
+    if (opts.backupDue && ok('backup')) return { id: 'backup', title: 'Save a backup copy', detail: 'Takes five seconds and keeps your numbers safe.', action: 'backup' };
+    if ((opts.hour || 0) >= 18 && !p.ledger.some((e) => e.type === 'spend' && e.date === today) && ok('log') && p.setupDone) {
+      return { id: 'log', title: 'Anything to log from today?', detail: 'Or nothing. Both are fine.', action: 'log' };
+    }
+    return { id: 'allset', title: 'Nothing needs you right now', detail: 'Your plan is up to date.', action: null };
+  }
+
+  /* ---------- quick entry: "250 groceries", "+1200 paycheck", "coffee 4.5" ---------- */
+  const CAT_WORDS = {
+    'Groceries': /grocer|supermarket|food shop|market|aldi|lidl|tesco|walmart|costco|trader|kroger/i,
+    'Eating out': /coffee|latte|lunch|dinner|breakfast|restaurant|takeaway|takeout|pizza|burger|cafe|snack|uber ?eats|doordash/i,
+    'Transport': /gas|petrol|fuel|uber|lyft|bus|train|metro|taxi|parking|ticket|toll/i,
+    'Home': /rent|home|house|cleaning|furniture|ikea|repair|laundry|household/i,
+    'Health': /pharmacy|doctor|dentist|medic|vitamin|therapy|gym|prescription/i,
+    'Fun': /movie|cinema|game|book|concert|bar|beer|wine|hobby|netflix|spotify|fun/i,
+    'Kids & pets': /kid|child|school|toy|baby|diaper|pet|dog|cat|vet/i,
+  };
+  function guessCat(p, note) {
+    for (const c of p.cats) { if (note && note.toLowerCase().includes(c.name.toLowerCase())) return c.name; }
+    for (const name of Object.keys(CAT_WORDS)) {
+      if (CAT_WORDS[name].test(note || '') && p.cats.some((c) => c.name === name)) return name;
+    }
+    return null;
+  }
+  function parseQuick(text) {
+    if (!text) return null;
+    let s = String(text).trim();
+    if (!s) return null;
+    let kind = 'spend';
+    if (s[0] === '+') { kind = 'income'; s = s.slice(1).trim(); }
+    // 12 · 12.50 · 12,5 · 1,000 · 1,000.50 · 1.000,50 (a third decimal digit is a typo, not an amount)
+    const m = s.match(/(?:^|\s)[^\d\s-]{0,3}(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d{1,3}(?:\.\d{3})+,\d{1,2}|\d{1,3}(?:\.\d{3}){2,}|\d+(?:[.,]\d{1,2})?)(?!\d)(?![.,]\d)/);
+    if (!m) return null;
+    const amount = parseMoney(m[1]);
+    if (!isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) return null;
+    const note = (s.slice(0, m.index) + ' ' + s.slice(m.index + m[0].length)).replace(/\s+/g, ' ').replace(/^[\s$£€¥]+|[\s]+$/g, '').trim();
+    return { kind, amount: round2(amount), note };
+  }
+  // parse a money field the way people type it: "1,200.50", "1200,5", "$40"
+  function parseMoney(v) {
+    if (typeof v === 'number') return isFinite(v) ? round2(v) : NaN;
+    let s = String(v == null ? '' : v).trim().replace(/[^\d.,-]/g, '');
+    if (!s) return NaN;
+    const lastDot = s.lastIndexOf('.'), lastComma = s.lastIndexOf(',');
+    if (lastDot >= 0 && lastComma >= 0) { s = lastComma > lastDot ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, ''); }
+    else if (lastComma >= 0) { const frac = s.length - lastComma - 1; s = frac === 3 && s.indexOf(',') === lastComma ? s.replace(',', '') : s.replace(',', '.'); }
+    else if ((s.match(/\./g) || []).length > 1) s = s.replace(/\./g, ''); // 1.000.000
+    return round2(parseFloat(s));
+  }
+  const MAX_AMOUNT = 1e9; // anything bigger is a typo, and would break the layout
+
+  /* ---------- summaries ---------- */
+  function monthSummary(p, ym) {
+    const inM = p.ledger.filter((e) => monthKey(e.date) === ym);
+    const income = round2(inM.filter((e) => e.type === 'income').reduce((a, e) => a + e.amt, 0));
+    const bills = round2(inM.filter((e) => e.type === 'bill').reduce((a, e) => a + e.amt, 0));
+    const refunds = round2(inM.filter((e) => e.type === 'refund').reduce((a, e) => a + e.amt, 0));
+    const gross = round2(inM.filter((e) => e.type === 'spend').reduce((a, e) => a + e.amt, 0));
+    const debt = round2(inM.filter((e) => e.type === 'debt').reduce((a, e) => a + e.amt, 0));
+    // "spent" never goes below zero (a refund for last month's purchase is not negative spending); cash flow still counts the refund in full
+    return { income, bills, spending: round2(Math.max(0, gross - refunds)), gross, debt, refunds, kept: round2(income + refunds - bills - gross - debt) };
+  }
+  /* ---------- statement (a bank-style look at any period) ---------- */
+  // key: month | last | 7 | 30 | all | custom ({from,to} in custom)
+  function periodRange(key, today, custom, p) {
+    const t = parse(today);
+    if (key === 'last') { const y = t.m === 1 ? t.y - 1 : t.y, m = t.m === 1 ? 12 : t.m - 1; return { from: iso(y, m, 1), to: iso(y, m, dim(y, m)) }; }
+    if (key === '7') return { from: addDays(today, -6), to: today };
+    if (key === '30') return { from: addDays(today, -29), to: today };
+    if (key === 'all') { const ds = ((p && p.ledger) || []).map((e) => e.date).sort(); return { from: ds[0] && ds[0] < today ? ds[0] : today, to: today }; }
+    if (key === 'custom' && custom && /^\d{4}-\d{2}-\d{2}$/.test(custom.from || '') && /^\d{4}-\d{2}-\d{2}$/.test(custom.to || '')) {
+      return custom.from <= custom.to ? { from: custom.from, to: custom.to } : { from: custom.to, to: custom.from };
+    }
+    return { from: iso(t.y, t.m, 1), to: iso(t.y, t.m, dim(t.y, t.m)) };
+  }
+  // kind: all | spend | in | bills. Totals always cover everything in the period; kind only filters the rows.
+  // opts: {q: text to look for in the name, category or amount, cat: one category}; they only filter the rows
+  function statement(p, from, to, k
