@@ -1,0 +1,155 @@
+>' + r[1] + '</td></tr>').join('') + '</tbody></table>' +
+      (s.due.length ? '<p class="small muted">Bills counted: ' + s.due.map((o) => esc(o.bill.name)).join(', ') + '.</p>' : '') +
+      '<p class="small muted">An organizing estimate, not financial advice. Nothing is connected to your bank: the balance is whatever you typed, plus what you logged since.</p>' +
+      '<button class="tiny" data-act="balance">Update my balance</button></details>';
+  }
+
+  function stepButtons(step) {
+    const id = esc(step.id); const k = step.ref ? esc(step.ref.key) : '';
+    switch (step.action) {
+      case 'setup': return '<div class="chips"><button class="primary" data-act="setup">Start</button></div>';
+      case 'balance': return '<div class="chips"><button class="primary" data-act="balance">Add my balance</button><button class="ghost" data-act="snooze" data-id="' + id + '">Later</button></div>';
+      case 'income': return '<div class="chips"><button class="primary" data-act="receive" data-key="' + k + '">Yes, it arrived</button><button data-act="snooze" data-id="' + id + '">Not yet</button></div>';
+      case 'bill': return '<div class="chips"><button class="primary" data-act="pay" data-key="' + k + '">Mark paid</button><button data-act="skip-bill" data-key="' + k + '">Skip it</button><button class="ghost" data-act="snooze" data-id="' + id + '">Later</button></div>';
+      case 'wait': return '<div class="chips"><button class="primary" data-act="wait-buy" data-id="' + esc(step.ref.id) + '">Yes, I will buy it</button><button data-act="wait-drop" data-id="' + esc(step.ref.id) + '">Let it go</button><button class="ghost" data-act="snooze" data-id="' + id + '">Later</button></div>';
+      case 'backup': return '<div class="chips"><button class="primary" data-act="backup-dl">Download backup</button><button class="ghost" data-act="snooze" data-id="' + id + '">Later</button></div>';
+      case 'log': return '<div class="chips"><button class="primary" data-act="focus-quick">Log something</button><button class="ghost" data-act="snooze" data-id="' + id + '">Not today</button></div>';
+      default: return '';
+    }
+  }
+
+  function viewBills() {
+    const t = today(); const s = C.computeSafe(P, t);
+    const od = C.overdueBills(P, t);
+    // what is soon (until payday, at least two weeks) stays in view; the rest folds away so a weekly bill does not flood the list
+    const soonTo = C.dayNum(s.endISO) > C.dayNum(t) + 14 ? s.endISO : C.addDays(t, 14);
+    const allUp = C.billsBetween(P, t, C.addDays(t, 35));
+    const up = allUp.filter((o) => C.dayNum(o.date) <= C.dayNum(soonTo)); const later = allUp.filter((o) => C.dayNum(o.date) > C.dayNum(soonTo));
+    const recent = P.ledger.filter((e) => e.type === 'bill' && C.daysBetween(e.date, t) <= 30 && C.daysBetween(e.date, t) >= 0).slice().reverse();
+    const mode = P.simple ? 'list' : (ses.billsMode || 'list');
+    let h = '<div class="row between wrapflex"><h2 style="margin:0">Bills</h2><button class="primary" data-act="bill-add">Add a bill</button></div>';
+    if (!P.simple) h += '<div class="chips" role="group" aria-label="Show bills as" style="margin-top:10px"><button class="chip' + (mode === 'list' ? ' on' : '') + '" data-act="bills-mode" data-v="list" aria-pressed="' + (mode === 'list') + '">List</button><button class="chip' + (mode === 'cal' ? ' on' : '') + '" data-act="bills-mode" data-v="cal" aria-pressed="' + (mode === 'cal') + '">Calendar</button></div>';
+    if (mode === 'cal') return h + calHtml();
+    h += '<div class="card" style="margin-top:12px"><div class="label">Still to go out before payday</div><div class="big num" style="font-size:2rem">' + fmt(s.billsTotal) + '</div><p class="muted small">' + s.due.length + (s.due.length === 1 ? ' bill' : ' bills') + (s.nextPay ? ' until ' + dlabel(s.nextPay.date) : ' until the end of the month') + (s.billsCovered ? ' &middot; ' + fmt(s.billsCovered) + ' of it is already set aside in your goals' : '') + '</p></div>';
+    if (od.length) h += '<div class="card amber"><h2>Waiting on you</h2><ul class="list">' + od.map((o) => billRow(o, 'open', true)).join('') + '</ul></div>';
+    h += '<div class="card"><h2>Coming up</h2>' + (up.length ? '<ul class="list">' + up.map((o) => billRow(o, o.state, false)).join('') + '</ul>' : '<p class="muted">' + (P.bills.length ? 'Nothing else is due soon.' : 'No bills yet. Add the big ones first: rent, phone, internet.') + '</p>') +
+      (later.length ? '<details><summary>Later this month (' + later.length + ')</summary><ul class="list">' + later.map((o) => billRow(o, o.state, false)).join('') + '</ul></details>' : '') +
+      (P.bills.length ? '<details><summary>Manage my bills (' + P.bills.length + ')</summary><ul class="list">' + P.bills.map((b) => '<li><span class="grow">' + esc(b.name) + '<br><span class="tag">' + esc(freqLabel(b)) + (b.auto ? ' · autopay' : '') + '</span></span><span class="amt num">' + fmt(b.amount) + '</span><button class="tiny" data-act="bill-edit" data-id="' + b.id + '">Edit</button></li>').join('') + '</ul></details>' : '') + '</div>';
+    if (recent.length) h += '<div class="card"><details><summary>Recently paid</summary><ul class="list">' + recent.map((e) => '<li><span class="grow">' + esc(e.note) + '<br><span class="tag">' + dlabel(e.date) + '</span></span><span class="amt num">' + fmt(e.amt) + '</span><button class="tiny ghost" data-act="del-entry" data-id="' + e.id + '">Undo</button></li>').join('') + '</ul></details></div>';
+    if (P.bills.length || P.incomes.length) h += '<div class="chips"><button class="ghost" data-act="ics">Add bills and paydays to my phone calendar</button></div>';
+    return h;
+  }
+  function billRow(o, state, overdue) {
+    const k = esc(o.key); const b = o.bill;
+    const when = (overdue ? 'was due ' : '') + dlabel(o.date) + ' · ' + rel(o.date);
+    let box, extra = '';
+    if (state === 'open') {
+      box = '<button class="check" data-act="pay" data-key="' + k + '" aria-label="Mark ' + esc(b.name) + ' paid"><i></i></button>';
+      extra = ' · <button class="linkbtn" data-act="skip-bill" data-key="' + k + '" aria-label="Skip ' + esc(b.name) + ' this time">skip</button>';
+    } else if (state === 'paid') {
+      box = '<button class="check on" data-act="unpay" data-key="' + k + '" aria-label="Paid. Tap to undo"><i>✓</i></button>';
+      extra = ' · <span class="pill ok">Paid</span>';
+    } else {
+      box = '<button class="check" data-act="unskip" data-key="' + k + '" aria-label="Skipped. Tap to undo"><i>–</i></button>';
+      extra = ' · <span class="pill">Skipped</span>';
+    }
+    return '<li class="billrow' + (state !== 'open' ? ' done' : '') + '">' + box + '<span class="grow"><button class="ghost nm" style="padding:0;min-height:36px;color:inherit;font-weight:600;text-align:left" data-act="bill-edit" data-id="' + b.id + '">' + esc(b.name) + '</button><br><span class="tag">' + when + extra + '</span></span><span class="amt num">' + fmt(b.amount) + '</span></li>';
+  }
+
+  function viewIncome() {
+    const t = today(); const np = C.nextPayday(P, t); const due = C.overduePaychecks(P, C.addDays(t, 1));
+    const ym = C.monthKey(t); const ms = C.monthSummary(P, ym);
+    let h = '<div class="row between wrapflex"><h2 style="margin:0">Money in</h2><button class="primary" data-act="income-add">Add a paycheck</button></div>';
+    if (due.length) h += '<div class="card sage" style="margin-top:12px"><h2>Did it arrive?</h2><ul class="list">' + due.map((o) => '<li style="flex-wrap:wrap"><span class="grow">' + esc(o.income.name) + '<br><span class="tag">' + dlabel(o.date) + '</span></span><span class="amt num">' + fmt(o.income.amount) + '</span><span class="row"><button class="tiny primary" data-act="receive" data-key="' + esc(o.key) + '">Yes</button><button class="tiny" data-act="skip-income" data-key="' + esc(o.key) + '">Skip</button></span></li>').join('') + '</ul></div>';
+    h += '<div class="card" style="margin-top:12px"><div class="label">Next payday</div>' + (np ? '<div class="big num" style="font-size:2rem">' + dlabel(np.date) + '</div><p class="muted">' + rel(np.date) + ' &middot; ' + esc(np.income.name) + ' &middot; ' + fmt(np.income.amount) + '</p>' : '<p class="muted">No paycheck yet. Add one so the countdown to payday works.</p>') + '</div>';
+    h += '<div class="card"><h2>My paychecks</h2>' + (P.incomes.length ? '<ul class="list">' + P.incomes.map((i) => '<li><span class="grow">' + esc(i.name) + '<br><span class="tag">' + esc(freqLabel(i)) + (i.early ? ' · early if weekend' : '') + '</span></span><span class="amt num">' + fmt(i.amount) + '</span><button class="tiny" data-act="income-edit" data-id="' + i.id + '">Edit</button></li>').join('') + '</ul>' : '<p class="muted">Monthly benefit plus a wage? Add each one with its own schedule. The countdown follows whichever lands next.</p>') +
+      '<div class="chips"><button data-act="oneoff">Add one-off money (refund, gift)</button></div></div>';
+    h += '<div class="card"><h2>This month</h2><div class="grid2"><div><div class="label">Came in</div><div class="amt num">' + fmt(ms.income) + '</div></div><div><div class="label">Went out</div><div class="amt num">' + fmt(ms.bills + ms.spending + ms.debt) + '</div></div></div><p class="muted small">Kept so far: ' + fmt(ms.kept) + '</p></div>';
+    return h;
+  }
+
+  function viewSpend() {
+    const t = today(); const ym = C.monthKey(t); const cs = C.catSpending(P, ym); const ms = C.monthSummary(P, ym);
+    let h = '<div class="row between wrapflex"><h2 style="margin:0">Spending</h2><button class="primary" data-act="spend-add">Log spending</button></div>';
+    h += '<div class="card" style="margin-top:12px"><div class="label">Spent this month</div><div class="big num" style="font-size:2rem">' + fmt(ms.spending) + '</div>' + (ms.refunds ? '<p class="muted small">Refunds this month: +' + fmt(ms.refunds) + '</p>' : '') + '</div>';
+    const envRow = (c) => {
+      const sp = cs[c.name] || 0; const lim = c.limit; const pct = lim ? Math.min(100, Math.round(sp / lim * 100)) : (sp ? 100 : 0);
+      return '<li style="flex-wrap:wrap"><span class="grow">' + esc(c.name) + (lim ? '<div class="bar' + (sp > lim ? ' over' : '') + '"><i style="width:' + pct + '%"></i></div>' : '') + '</span>' +
+        '<span class="amt num">' + fmt(sp) + (lim ? ' <span class="tag">of ' + fmt(lim) + (sp > lim ? ' · a little over, that is okay' : '') + '</span>' : '') + '</span><button class="tiny ghost" data-act="cat-limit" data-id="' + c.id + '">' + (lim ? 'Limit' : 'Set limit') + '</button></li>';
+    };
+    const names = Object.keys(cs).sort((a, b) => cs[b] - cs[a]); const tot = names.reduce((a, n) => a + cs[n], 0);
+    if (names.length) {
+      const prev = C.catSpending(P, C.monthKey(C.periodRange('last', t).from));
+      h += '<div class="card"><h2>Where it went</h2><ul class="list">' + names.map((n) => {
+        const pct = Math.round(cs[n] / tot * 100);
+        return '<li style="flex-wrap:wrap"><span class="grow">' + esc(n) + ' <span class="tag">' + pct + '%' + (prev[n] ? ' · last month ' + esc(fmt(prev[n])) : '') + '</span><div class="sharebar" role="img" aria-label="' + pct + ' percent"><i style="width:' + pct + '%"></i></div></span><span class="amt num">' + fmt(cs[n]) + '</span></li>';
+      }).join('') + '</ul></div>';
+    }
+    const used = P.cats.filter((c) => (cs[c.name] || 0) > 0 || c.limit); const rest = P.cats.filter((c) => !used.includes(c));
+    h += '<div class="card"><h2>Envelopes</h2><p class="muted small">Soft limits. Going over just gets noticed, never scolded.</p>' +
+      (used.length ? '<ul class="list">' + used.map(envRow).join('') + '</ul>' : '<p class="muted">Nothing spent yet this month.</p>') +
+      (rest.length ? '<details><summary>' + (used.length ? 'Other envelopes (' + rest.length + ')' : 'All envelopes (' + rest.length + ')') + '</summary><ul class="list">' + rest.map(envRow).join('') + '</ul></details>' : '') + '</div>';
+    h += stmtCard(t);
+    return h;
+  }
+
+  /* ---------- statement: every movement in a chosen period ---------- */
+  const stmtState = () => ses.stmt || (ses.stmt = { period: 'month', kind: 'all', from: '', to: '', q: '', cat: '' });
+  const stmtData = () => { const st = stmtState(); const r = C.periodRange(st.period, today(), st, P); return C.statement(P, r.from, r.to, st.kind, { q: st.q, cat: st.cat }); };
+  function stmtCard(t) {
+    const st = stmtState(); const d = stmtData();
+    const opt = (list, cur) => list.map((x) => '<option value="' + x[0] + '"' + (x[0] === cur ? ' selected' : '') + '>' + x[1] + '</option>').join('');
+    const yr = t.slice(0, 4);
+    const dayHead = (s) => relDay(s, t) + (s.slice(0, 4) !== yr ? ' ' + s.slice(0, 4) : '');
+    let h = '<div class="card" id="stmt"><h2>Statement</h2>' +
+      '<div class="grid2"><div><label for="stP" style="margin-top:0">Period</label><select id="stP" data-stmt="period">' + opt([['month', 'This month'], ['last', 'Last month'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['all', 'Everything'], ['custom', 'Choose dates…']], st.period) + '</select></div>' +
+      '<div><label for="stK" style="margin-top:0">Show</label><select id="stK" data-stmt="kind">' + opt([['all', 'Everything'], ['spend', 'Spending'], ['in', 'Money in'], ['bills', 'Bills & debts']], st.kind) + '</select></div></div>';
+    if (st.period === 'custom') h += '<div class="grid2"><div><label for="stF">From</label><input id="stF" type="date" data-stmt="from" value="' + d.from + '" max="' + t + '"></div><div><label for="stT">To</label><input id="stT" type="date" data-stmt="to" value="' + d.to + '" max="' + t + '"></div></div>';
+    h += '<div class="grid2"><div><label for="stQ">Search</label><input id="stQ" type="search" data-stmt="q" value="' + esc(st.q) + '" placeholder="name, envelope or amount" autocomplete="off"></div>' +
+      '<div><label for="stC">Envelope</label><select id="stC" data-stmt="cat">' + opt([['', 'All']].concat(P.cats.map((c) => [esc(c.name), esc(c.name)])), esc(st.cat)) + '</select></div></div>';
+    h += '<p class="muted small" style="margin:10px 0 4px">' + esc(dlabelY(d.from)) + (d.to !== d.from ? ' – ' + esc(dlabelY(d.to)) : '') + '</p>' +
+      '<div class="grid2 stmtsum"><div><div class="label">Start of period</div><div class="amt num">' + fmt(d.opening) + '</div></div><div><div class="label">End of period</div><div class="amt num">' + fmt(d.closing) + '</div></div>' +
+      '<div><div class="label">Money in</div><div class="amt num pos">+' + fmt(d.in) + '</div></div><div><div class="label">Money out</div><div class="amt num">&minus;' + fmt(d.out) + '</div></div></div>';
+    if (!d.rows.length) return h + '<p class="muted" style="margin-top:12px">' + (st.q || st.cat ? 'Nothing matches that search in this period.' : 'Nothing in this period.') + '</p></div>';
+    const LIMIT = 200; let last = '';
+    h += '<ul class="list stmtlist" style="margin-top:6px">';
+    d.rows.slice(0, LIMIT).forEach((x) => {
+      const e = x.e;
+      if (e.date !== last) { last = e.date; h += '<li class="dayhead" aria-hidden="false"><span class="label">' + esc(dayHead(e.date)) + '</span></li>'; }
+      const name = esc(entryText(e)) + (e.cat && e.note ? ' <span class="tag">' + esc(e.cat) + '</span>' : '');
+      h += '<li><button type="button" class="rowedit grow" data-act="' + (e.type === 'spend' ? 'edit-spend' : 'edit-entry') + '" data-id="' + e.id + '" aria-label="Edit">' + name + '</button>' +
+        '<span class="amt num' + (e.delta > 0 ? ' pos' : '') + '">' + (e.delta > 0 ? '+' : e.delta < 0 ? '&minus;' : '') + fmt(Math.abs(e.amt)) + '</span><button class="x" data-act="del-entry" data-id="' + e.id + '" aria-label="Remove">×</button></li>';
+    });
+    h += '</ul>' + (d.rows.length > LIMIT ? '<p class="muted small">Showing the latest ' + LIMIT + ' of ' + d.rows.length + '. Pick a shorter period to see the rest.</p>' : '');
+    return h + '<div class="chips"><button data-act="csv">Download this statement (CSV)</button></div></div>';
+  }
+  function entryText(e) {
+    switch (e.type) {
+      case 'spend': return e.note || e.cat || 'Spending';
+      case 'bill': return e.note || 'Bill';
+      case 'income': return e.note || 'Money in';
+      case 'refund': return 'Refund · ' + (e.note || e.cat || '');
+      case 'debt': return 'Extra payment · ' + (e.note || '');
+      case 'adjust': return 'Balance update';
+      default: return e.note || '';
+    }
+  }
+
+  // received (counted in the balance) | skipped | waiting (past, not confirmed yet) | expected (still ahead)
+  function payState(inc, date, t) {
+    const v = P.received[inc.id + '|' + date];
+    return v === 'skip' ? 'skipped' : v ? 'received' : date < t ? 'waiting' : 'expected';
+  }
+  function calHtml() {
+    const t = today(); if (!calYM) calYM = C.monthKey(t);
+    const y = +calYM.slice(0, 4), m = +calYM.slice(5, 7);
+    const first = C.iso(y, m, 1), last = C.iso(y, m, C.dim(y, m));
+    const bills = C.billsBetween(P, first, last);
+    const pays = []; P.incomes.forEach((inc) => C.occurrences(inc, first, last).forEach((d) => pays.push({ inc, date: d, st: payState(inc, d, t) })));
+    const byDay = {}; const get = (d) => (byDay[d] = byDay[d] || { bills: [], pays: [], sp: [] });
+    bills.forEach((o) => get(o.date).bills.push(o)); pays.forEach((o) => get(o.date).pays.push(o));
+    P.ledger.filter((e) => e.type === 'spend' && C.monthKey(e.date) === calYM).forEach((e) => get(e.date).sp.push(e));
+    const lead = C.dow(first); const title = new Date(y, m - 1, 1).toLocaleDateString(DLOC, { month: 'long', year: 'numeric' });
+    const ms = C.monthSummary(P, calYM);
+    let h = '<div class="card"><div class="row between"><button class="tiny" data-act="cal-prev" aria-label="Previous month">&larr;</button><h2 style="margin:0">' + esc(title) + '</h2><button class="tiny" data-act="cal-next" aria-label="Next month">&rarr;</button></div><div class="cal" style="margin-top:10px">' +
+      ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => '<div class="dow">' + d + '</div>').join('') + '<button class="e
