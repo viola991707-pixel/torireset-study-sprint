@@ -1,0 +1,241 @@
+wice.</p>') +
+        q('I stopped using it for a while', '<p>That is fine. When you come back, a calm card offers to treat everything before today as handled. Update your balance and carry on. There are no streaks to break.</p>') +
+        q('I made a mistake', '<p>Every logged item has a Remove button and every action has an Undo for a few seconds. Tap any item in Recent spending or the Statement to change its amount, date or category.</p>') +
+        q('Quick typing', '<p>In the box on Today: <code>250 groceries</code> logs a spend. <code>+1200 paycheck</code> adds money in. The category is guessed from the word.</p>');
+    },
+  };
+
+  /* ---------- render ---------- */
+  function applyTheme() {
+    const th = S.theme || 'auto';
+    if (th === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', th);
+  }
+  const VIEWS = { today: viewToday, bills: viewBills, income: viewIncome, spend: viewSpend, more: viewMore };
+  function render() {
+    applyTheme();
+    if (!VIEWS[view]) view = 'today';
+    // autopay: bills and paychecks the person opted in are counted on their due date
+    if (!P.example) {
+      const auto = C.applyAuto(P, today());
+      if (auto.length) { save(); toast(auto.length === 1 ? auto[0].name + ' counted automatically' : auto.length + ' items counted automatically (autopay)'); }
+    }
+    $('#appSub').textContent = P.title + (S.profiles.length > 1 ? ' · ' + P.name : '');
+    document.querySelectorAll('#tabs button').forEach((b) => { if (b.dataset.view === view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    $('#app').innerHTML = banners() + VIEWS[view]();
+    if (ses.focusQuick) { ses.focusQuick = false; const q = $('#quick'); if (q) q.focus(); }
+  }
+
+  /* ---------- modal flows ---------- */
+  function money(fd, name, o) {
+    o = o || {}; const v = C.parseMoney(fd.get(name));
+    if (!Number.isFinite(v)) return o.optional && !String(fd.get(name) || '').trim() ? null : 'Type an amount, like 12.50';
+    if (!o.negOk && v <= 0) return 'The amount needs to be more than zero.';
+    if (Math.abs(v) > 1e9) return 'That is a very big number. Please check it.';
+    return v;
+  }
+  const isErr = (v) => typeof v === 'string';
+
+  function billModal(b) {
+    const edit = !!b;
+    const goalOpts = [['', 'My spendable money']].concat(P.goals.map((g) => [g.id, g.name]));
+    modal(edit ? 'Edit bill' : 'Add a bill',
+      fld('Name', 'name', edit ? b.name : '', { ph: 'Rent, phone, internet…', max: 40 }) + fld('Amount', 'amount', edit ? b.amount : '', { money: true }) + schedFields(b) +
+      (P.goals.length ? sel('Pay from', 'goalId', goalOpts, edit ? b.goalId || '' : '') : '') +
+      '<div data-show="months"><p class="hint" id="spreadHint" aria-live="polite"></p>' +
+      (edit && b.goalId ? '' : '<label class="check"><input type="checkbox" name="fund"' + (edit ? '' : ' checked') + '> Set money aside a little each month for it (makes a goal)</label>') + '</div>' +
+      '<label class="check"><input type="checkbox" name="auto"' + (edit && b.auto ? ' checked' : '') + '> Count it as paid on the due date (autopay)</label>' +
+      '<label class="check"><input type="checkbox" name="sub"' + (edit && b.sub ? ' checked' : '') + '> This is a subscription I might want to review</label>',
+      {
+        submit: edit ? 'Save' : 'Add bill',
+        onOpen(form) {
+          bindSched(form);
+          const hint = () => {
+            const a = C.parseMoney(form.elements.amount.value), n = parseInt(form.elements.every.value, 10) || 6;
+            $('#spreadHint').textContent = Number.isFinite(a) && a > 0 && form.elements.freq.value === 'months' ? 'That is about ' + fmt(C.round2(a / n)) + ' a month, ' + fmt(C.perYear({ amount: a, freq: 'months', every: n })) + ' a year.' : '';
+          };
+          ['amount', 'every', 'freq'].forEach((n) => form.elements[n].addEventListener('input', hint)); form.elements.freq.addEventListener('change', hint); form.elements.every.addEventListener('change', hint); hint();
+        },
+        extra: edit ? '<button type="button" class="danger" data-act="bill-del" data-id="' + b.id + '">Delete</button>' : '',
+        onSubmit(fd) {
+          const name = String(fd.get('name') || '').trim(); if (!name) return 'Give it a name.';
+          const amt = money(fd, 'amount'); if (isErr(amt)) return amt;
+          const sch = readSched(fd, false); if (isErr(sch)) return sch;
+          let goalId = fd.get('goalId') || undefined;
+          if (!goalId && sch.freq === 'months' && fd.get('fund') && !(edit && b.goalId)) { const g = { id: C.uid(), name, target: 0 }; P.goals.push(g); goalId = g.id; }
+          const auto = !!fd.get('auto'), sub = !!fd.get('sub');
+          const flags = { auto: auto || undefined, autoFrom: auto ? (edit && b.auto && b.autoFrom ? b.autoFrom : today()) : undefined, sub: sub || undefined };
+          if (edit) {
+            Object.assign(b, sch, { name, amount: amt, goalId }, flags);
+            const d = b.debtId && P.debts.find((x) => x.id === b.debtId); if (d) d.min = amt; // the debt's minimum follows its bill
+          } else P.bills.push(Object.assign({ id: C.uid(), name, amount: amt, goalId, start: today() }, sch, flags));
+          save(); render(); toast(edit ? 'Bill saved' : name + ' added');
+        },
+      });
+  }
+  function incomeModal(inc) {
+    const edit = !!inc;
+    modal(edit ? 'Edit paycheck' : 'Add a paycheck',
+      fld('Name', 'name', edit ? inc.name : 'Paycheck', { max: 40 }) + fld('Amount (what lands in your account)', 'amount', edit ? inc.amount : '', { money: true }) + schedFields(inc || { freq: 'biweekly' }, true) +
+      '<label class="check"><input type="checkbox" name="auto"' + (edit && inc.auto ? ' checked' : '') + '> Add it to my balance on payday without asking</label><p class="hint">Only turn this on if the amount is always the same.</p>',
+      {
+        submit: edit ? 'Save' : 'Add paycheck', onOpen: bindSched,
+        extra: edit ? '<button type="button" class="danger" data-act="income-del" data-id="' + inc.id + '">Delete</button>' : '',
+        onSubmit(fd) {
+          const name = String(fd.get('name') || '').trim() || 'Paycheck';
+          const amt = money(fd, 'amount'); if (isErr(amt)) return amt;
+          const sch = readSched(fd, true); if (isErr(sch)) return sch;
+          const auto = !!fd.get('auto'); const flags = { auto: auto || undefined, autoFrom: auto ? (edit && inc.auto && inc.autoFrom ? inc.autoFrom : today()) : undefined };
+          if (edit) Object.assign(inc, sch, { name, amount: amt }, flags); else P.incomes.push(Object.assign({ id: C.uid(), name, amount: amt, start: today() }, sch, flags));
+          save(); render(); toast(edit ? 'Saved' : name + ' added');
+        },
+      });
+  }
+  function balanceModal() {
+    modal('Update my balance', fld('What does your banking app say right now?', 'bal', C.balance(P), { money: true, hint: 'Nothing connects to your bank. This is just the number you type.' }), {
+      submit: 'Update',
+      onSubmit(fd) {
+        const v = money(fd, 'bal', { negOk: true }); if (isErr(v)) return v;
+        const before = C.balance(P); setBalance(v); save(); ses.catchDismissed = true; render(); toast('Balance is now ' + fmt(v), () => { const last = P.ledger[P.ledger.length - 1]; if (last && last.type === 'adjust' && C.balance(P) !== before) { delEntry(last.id); render(); } });
+      },
+    });
+  }
+  function spendModal() {
+    modal('Log spending', fld('Amount', 'amount', '', { money: true }) + fld('What was it?', 'note', '', { ph: 'coffee, groceries…', max: 60 }) + sel('Envelope', 'cat', [['', 'Pick for me']].concat(P.cats.map((c) => [c.name, c.name])), '') + fld('Date', 'date', today(), { type: 'date', max2: today() }), {
+      submit: 'Log it',
+      onSubmit(fd) {
+        const amt = money(fd, 'amount'); if (isErr(amt)) return amt;
+        if (isFuture(fd.get('date'))) return FUTURE_MSG;
+        const date = pastDate(fd, 'date'); const note = String(fd.get('note') || '').trim();
+        const cat = fd.get('cat') || C.guessCat(P, note) || 'Other';
+        addEntry(C.spendEntry(date, amt, cat, note), fmt(amt) + ' logged');
+      },
+    });
+  }
+  // folds the extra "Log a spend" options away; with clear it also forgets whatever was typed
+  function closeQuick(clear) {
+    ses.quickOpen = false; ses.quickCat = null;
+    const f = $('form[data-form="quick"]'); if (!f) return;
+    if (clear) f.reset();
+    const m = $('#quickMore'); if (m) m.hidden = true;
+    f.querySelectorAll('[data-act="qcat"]').forEach((b) => { b.classList.remove('on'); b.setAttribute('aria-pressed', 'false'); });
+    if (document.activeElement && f.contains(document.activeElement)) document.activeElement.blur();
+  }
+  const quickEmpty = (f) => !f.elements.q.value.trim() && !(f.elements.note && f.elements.note.value.trim()) && !ses.quickCat;
+  // any other entry (a paid bill, a paycheck, a debt payment): fix the amount or the date, e.g. the electric bill came out different
+  function editAmountModal(id) {
+    const e = P.ledger.find((x) => x.id === id); if (!e || e.type === 'goal') return;
+    modal('Edit this entry', '<p class="muted">' + esc(entryText(e)) + '</p>' + fld('Amount', 'amount', e.amt, { money: true }) + fld('Date', 'date', e.date, { type: 'date', max2: today() }), {
+      submit: 'Save',
+      onSubmit(fd) {
+        const amt = money(fd, 'amount'); if (isErr(amt)) return amt;
+        if (isFuture(fd.get('date'))) return FUTURE_MSG;
+        const before = Object.assign({}, e); const sign = e.delta < 0 ? -1 : 1;
+        e.amt = amt; e.delta = sign * amt; if (e.goalId) e.goalDelta = sign * amt; if (e.debtId && e.type !== 'spend') e.debtPaid = amt;
+        e.date = isDate(fd.get('date')) ? fd.get('date') : e.date;
+        save(); render(); toast('Saved', () => { Object.assign(e, before); save(); render(); });
+      },
+    });
+  }
+  function editSpendModal(id) {
+    const e = P.ledger.find((x) => x.id === id && x.type === 'spend'); if (!e) return;
+    const cats = P.cats.map((c) => c.name); if (e.cat && !cats.includes(e.cat)) cats.push(e.cat);
+    modal('Edit this spend', fld('Amount', 'amount', e.amt, { money: true }) + fld('What was it?', 'note', e.note, { ph: 'coffee, groceries…', max: 60 }) + sel('Envelope', 'cat', cats.map((n) => [n, n]), e.cat || 'Other') + fld('Date', 'date', e.date, { type: 'date', max2: today() }), {
+      submit: 'Save',
+      extra: '<button type="button" data-act="spend-again" data-id="' + e.id + '">Log again today</button>',
+      onSubmit(fd) {
+        const amt = money(fd, 'amount'); if (isErr(amt)) return amt;
+        if (isFuture(fd.get('date'))) return FUTURE_MSG;
+        const before = Object.assign({}, e);
+        e.amt = amt; e.delta = -amt; if (e.goalId) e.goalDelta = -amt;
+        e.note = String(fd.get('note') || '').trim(); e.cat = fd.get('cat') || e.cat; e.date = isDate(fd.get('date')) ? fd.get('date') : e.date;
+        save(); render(); toast('Saved', () => { Object.assign(e, before); save(); render(); });
+      },
+    });
+  }
+  function oneOffModal() {
+    modal('Add one-off money',
+      sel('What kind?', 'kind', [['in', 'Money in (gift, side income)'], ['refund', 'Refund for something I bought']], 'in') +
+      fld('Amount', 'amount', '', { money: true }) + fld('What was it?', 'note', '', { ph: 'gift, returned shoes…', max: 60 }) +
+      '<div data-show="refund">' + sel('Takes it off which envelope?', 'cat', [['', 'Pick for me']].concat(P.cats.map((c) => [c.name, c.name])), '') + '</div>' +
+      fld('Date', 'date', today(), { type: 'date', max2: today() }), {
+        submit: 'Add',
+        onOpen(form) {
+          const upd = () => form.querySelectorAll('[data-show]').forEach((el) => { el.hidden = el.dataset.show !== form.elements.kind.value; });
+          form.elements.kind.addEventListener('change', upd); upd();
+        },
+        onSubmit(fd) {
+          const amt = money(fd, 'amount'); if (isErr(amt)) return amt;
+          if (isFuture(fd.get('date'))) return FUTURE_MSG;
+          const date = pastDate(fd, 'date'), note = String(fd.get('note') || '').trim();
+          if (fd.get('kind') === 'refund') addEntry(C.refundEntry(date, amt, fd.get('cat') || C.guessCat(P, note) || 'Other', note || 'Refund'), fmt(amt) + ' refund added');
+          else addEntry(C.incomeEntry(date, amt, note || 'Money in'), fmt(amt) + ' added');
+        },
+      });
+  }
+  function goalModal(g) {
+    const edit = !!g;
+    modal(edit ? 'Edit goal' : 'Add a goal', fld('Name', 'name', edit ? g.name : '', { ph: 'Car insurance, holiday…', max: 40 }) + fld('Target (optional)', 'target', edit && g.target ? g.target : '', { money: true }) +
+      fld('Have it by (optional)', 'due', edit && g.due ? g.due : '', { type: 'date', hint: 'With a target and a date, you see how much to set aside each month.' }), {
+      submit: edit ? 'Save' : 'Add goal',
+      extra: edit ? '<button type="button" class="danger" data-act="goal-del" data-id="' + g.id + '">Delete</button>' : '',
+      onSubmit(fd) {
+        const name = String(fd.get('name') || '').trim(); if (!name) return 'Give it a name.';
+        const target = money(fd, 'target', { optional: true }); if (isErr(target)) return target;
+        const due = isDate(fd.get('due')) ? fd.get('due') : '';
+        if (edit) { g.name = name; g.target = target || 0; g.due = due || undefined; } else P.goals.push({ id: C.uid(), name, target: target || 0, due: due || undefined });
+        save(); render();
+      },
+    });
+  }
+  function goalMoveModal(g, dir) {
+    const title = dir === 'in' ? 'Set money aside for ' + g.name : dir === 'out' ? 'Release money from ' + g.name : 'Spend from ' + g.name;
+    const saved = C.goalSaved(P, g.id);
+    modal(title, '<p class="muted small">' + (dir === 'in' ? 'It stays in your account, but is taken out of what you can spend.' : dir === 'out' ? 'It goes back into what you can spend.' : 'It leaves your account and your goal.') + ' In this goal now: ' + fmt(saved) + '.</p>' + fld('Amount', 'amount', '', { money: true }) + (dir === 'spend' ? fld('What for?', 'note', '', { max: 60 }) : ''), {
+      submit: 'Done',
+      onSubmit(fd) {
+        const amt = money(fd, 'amount'); if (isErr(amt)) return amt;
+        if (dir !== 'in' && amt > saved + 0.001) return 'There is only ' + fmt(saved) + ' in this goal.';
+        if (dir === 'in') addEntry(C.setAsideEntry(today(), g.id, amt), fmt(amt) + ' set aside');
+        else if (dir === 'out') addEntry(C.setAsideEntry(today(), g.id, -amt), fmt(amt) + ' released');
+        else addEntry(C.spendEntry(today(), amt, null, String(fd.get('note') || '').trim() || g.name, g.id), fmt(amt) + ' spent from ' + g.name);
+      },
+    });
+  }
+  function debtModal(d) {
+    const edit = !!d;
+    const lbill = edit ? P.bills.find((b) => b.debtId === d.id) : null; // the minimum-payment bill this debt created
+    modal(edit ? 'Edit debt' : 'Add a debt',
+      fld('Name', 'name', edit ? d.name : '', { ph: 'Credit card, loan…', max: 40 }) + fld('What you owe now', 'balance', edit ? C.debtBalance(P, d) : '', { money: true }) +
+      fld('Minimum payment (optional)', 'min', edit && d.min ? d.min : '', { money: true }) + fld('Interest rate % (optional)', 'rate', edit && d.rate ? d.rate : '', { money: true }) +
+      fld('Due day of the month (optional)', 'day', edit && lbill ? lbill.day : '', { num: true, hint: edit && lbill ? 'The minimum bill follows what you type here.' : 'Adds the minimum to your Bills.' }),
+      {
+        submit: edit ? 'Save' : 'Add debt',
+        extra: edit ? '<button type="button" class="danger" data-act="debt-del" data-id="' + d.id + '">Delete</button>' : '',
+        onSubmit(fd) {
+          const name = String(fd.get('name') || '').trim(); if (!name) return 'Give it a name.';
+          const bal = money(fd, 'balance', { negOk: true }); if (isErr(bal)) return bal;
+          const min = money(fd, 'min', { optional: true }); if (isErr(min)) return min;
+          const rate = money(fd, 'rate', { optional: true }); if (isErr(rate)) return rate;
+          const day = parseInt(fd.get('day'), 10); const dayOk = day >= 1 && day <= 31;
+          if (edit) {
+            d.balance0 = C.round2(bal + (d.balance0 - C.debtBalance(P, d))); const oldName = d.name; d.name = name; d.min = min || 0; d.rate = rate || 0;
+            // the minimum bill follows the debt, so the plan never counts an old amount
+            if (lbill && d.min) { lbill.amount = d.min; if (dayOk) lbill.day = day; if (lbill.name === oldName + ' minimum') lbill.name = name + ' minimum'; }
+            else if (!lbill && d.min && dayOk) P.bills.push({ id: C.uid(), name: name + ' minimum', amount: d.min, freq: 'monthly', day, debtId: d.id, start: today() });
+            save(); render();
+            if (lbill && !d.min) {
+              const bid = lbill.id;
+              setTimeout(() => confirmModal('Remove the minimum bill too?', 'You cleared the minimum payment, but &ldquo;' + esc(lbill.name) + '&rdquo; is still in your Bills (' + esc(fmt(lbill.amount)) + ').', 'Remove it', () => { P.bills = P.bills.filter((b) => b.id !== bid); save(); render(); toast('Bill removed'); }), 0);
+            }
+            return;
+          }
+          const nd = { id: C.uid(), name, balance0: bal, min: min || 0, rate: rate || 0 }; P.debts.push(nd);
+          if (nd.min && dayOk) P.bills.push({ id: C.uid(), name: name + ' minimum', amount: nd.min, freq: 'monthly', day, debtId: nd.id, start: today() });
+          save(); render();
+        },
+      });
+  }
+  function debtPayModal(d) {
+    modal('Payment toward ' + d.name, '<p class="muted small">Owed now: ' + fmt(C.debtBalance(P, d)) + '. For the regular minimum, mark the bill paid instead.</p>' + fld('Amount', 'amount', '', { money: true }), {
+      submit: 'Record',
+      onSubmit(fd) { const amt = money(fd, 'amount'); if (isErr(amt)) return amt; const pay = Math.min(amt, Math.max(0, C.debtBalance(P, d))); if (pay <= 0) return 'This debt is alrea
